@@ -247,6 +247,18 @@ circuit_is_better(const origin_circuit_t *oa, const origin_circuit_t *ob,
   return 0;
 }
 
+void print_log_circuit(origin_circuit_t *circ){
+
+	int i;
+	int len=(circ->build_state)->desired_path_len;
+	crypt_path_t * temp=circ->cpath;
+	for(i=0;i<len;i++){
+		tor_log(LOG_NOTICE,LD_CIRC,"%d %d %s ",len,i+1,temp->extend_info->nickname);
+		temp=temp->next;
+	}
+	
+}
+
 /** Find the best circ that conn can use, preferably one which is
  * dirty. Circ must not be too old.
  *
@@ -289,6 +301,19 @@ circuit_get_best(const entry_connection_t *conn,
       continue;
      
     origin_circ = TO_ORIGIN_CIRCUIT(circ);
+	/* Log an info message if we're going to launch a new intro circ in}
+     * parallel */
+    if (purpose == CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT &&
+        !must_be_open && origin_circ->hs_circ_has_timed_out) {
+        intro_going_on_but_too_old = 1;
+        continue;
+    }
+	
+    
+    if (!circuit_is_acceptable(origin_circ,conn,must_be_open,purpose,
+                               need_uptime,need_internal, (time_t)now.tv_sec))
+      continue;
+
 	if(options->Size>limit  && origin_circ->build_state->need_capacity){
 		
 		tor_log(LOG_NOTICE,LD_CIRC,"VKA:Modified algorithm circ ");
@@ -297,18 +322,6 @@ circuit_get_best(const entry_connection_t *conn,
         
 		return origin_circ;
 	}
-    /* Log an info message if we're going to launch a new intro circ in}
-     * parallel */
-    if (purpose == CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT &&
-        !must_be_open && origin_circ->hs_circ_has_timed_out) {
-        intro_going_on_but_too_old = 1;
-        continue;
-    }
-
-    if (!circuit_is_acceptable(origin_circ,conn,must_be_open,purpose,
-                               need_uptime,need_internal, (time_t)now.tv_sec))
-      continue;
-
     /* now this is an acceptable circ to hand back. but that doesn't
      * mean it's the *best* circ to hand back. try to decide.
      */
@@ -1000,7 +1013,8 @@ static void
 circuit_predict_and_launch_new(void)
 {
   circuit_t *circ;
-  int num=0, num_internal=0, num_uptime_internal=0;
+  origin_circuit_t * circuit;
+  int num=0, num_internal=0, num_uptime_internal=0,num_need_capacity=0;
   int hidserv_needs_uptime=0, hidserv_needs_capacity=1;
   int port_needs_uptime=0, port_needs_capacity=1;
   time_t now = time(NULL);
@@ -1025,6 +1039,9 @@ circuit_predict_and_launch_new(void)
     if (build_state->onehop_tunnel)
       continue;
     num++;
+    if (build_state->need_capacity){
+    	num_need_capacity++;
+    }
     if (build_state->is_internal)
       num_internal++;
     if (build_state->need_uptime && build_state->is_internal)
@@ -1040,19 +1057,25 @@ circuit_predict_and_launch_new(void)
    * and no circuit is currently available that can handle it. */
   /*VKA modified  frequency for fast circuit creation*/
   int frequent_fast_circuit_create=3;
+  if(num%(frequent_fast_circuit_create)==0){
+  	flags |= CIRCLAUNCH_NEED_CAPACITY;
+      tor_log(LOG_NOTICE,LD_CIRC,"VKA: creating fast circuits for the circuit where number of fast circuits were %d",num_need_capacity);
+      
+   }
   if (!circuit_all_predicted_ports_handled(now, &port_needs_uptime,
                                            &port_needs_capacity)) {
     if (port_needs_uptime)
       flags |= CIRCLAUNCH_NEED_UPTIME;
    /*VKA modified **/    
-	if (port_needs_capacity || num%(frequent_fast_circuit_create)==0){
+	if (port_needs_capacity ){
       flags |= CIRCLAUNCH_NEED_CAPACITY;
-      tor_log(LOG_NOTICE,LD_CIRC,"VKA: creating fast circuits for the circuit %d",num);
-      }
+      tor_log(LOG_NOTICE,LD_CIRC,"creating fast circuits for the circuit by default algorithm");
+     }
     log_info(LD_CIRC,
              "Have %d clean circs (%d internal), need another exit circ.",
              num, num_internal);
-    circuit_launch(CIRCUIT_PURPOSE_C_GENERAL, flags);
+    circuit=circuit_launch(CIRCUIT_PURPOSE_C_GENERAL, flags);
+    if(flags & CIRCLAUNCH_NEED_CAPACITY)print_log_circuit(circuit);
     return;
   }
 
@@ -1784,17 +1807,6 @@ circuit_reset_failure_count(int timeout)
 /* convert string of type "10 MiB" to bytes */
 
 
-void print_log_circuit(origin_circuit_t *circ){
-
-	int i;
-	int len=(circ->build_state)->desired_path_len;
-	crypt_path_t * temp=circ->cpath;
-	for(i=0;i<len;i++){
-		tor_log(LOG_NOTICE,LD_CIRC,"%d %d %s ",len,i+1,temp->extend_info->nickname);
-		temp=temp->next;
-	}
-	
-}
 
 
 /** Find an open circ that we're happy to use for <b>conn</b> and return 1. If
@@ -2015,7 +2027,7 @@ circuit_get_open_circ_or_launch(entry_connection_t *conn,
     }
 
 
-	int new_circ_purpose;
+	
     if (desired_circuit_purpose == CIRCUIT_PURPOSE_C_REND_JOINED)
       new_circ_purpose = CIRCUIT_PURPOSE_C_ESTABLISH_REND;
     else if (desired_circuit_purpose == CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT)
@@ -2063,7 +2075,7 @@ circuit_get_open_circ_or_launch(entry_connection_t *conn,
           rend_client_rendcirc_has_opened(circ);
       }
     }
-   /* endif (!circ) */
+ }  /* endif (!circ) */
   if (circ) {
     /* Mark the circuit with the isolation fields for this connection.
      * When the circuit arrives, we'll clear these flags: this is
